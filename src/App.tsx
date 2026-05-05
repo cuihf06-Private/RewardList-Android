@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ListOrdered, Gift, BarChart3, User as UserIcon, Plus, ArrowLeft, Trophy, ClipboardList, FileText, Activity, Banknote, RefreshCw,
   Send, X, Trash2, Bell, LogOut, Sparkles, ChevronRight, Users, Info,
-  ChevronDown, ChevronUp
+  ChevronDown, ChevronUp, Download, Upload, Shield
 } from 'lucide-react';
 import type { User as UserType, Reward, RewardCategory, RewardStatus } from './types';
 import * as store from './store';
@@ -47,6 +47,30 @@ type Tab = 'myLists' | 'asRewarder' | 'summary' | 'profile';
 type View = 'auth' | 'main' | 'listDetail';
 type AuthMode = 'login' | 'register';
 type ModalType = 'createList' | 'addReward' | 'invite' | null;
+
+// ===================== Update Banner =====================
+
+function UpdateBanner({ info, onDismiss }: { info: store.UpdateInfo; onDismiss: () => void }) {
+  return (
+    <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2 text-sm">
+        <Sparkles size={16} />
+        <span>发现新版本 v{info.latestVersion}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => window.open(info.releasePageUrl, '_blank')}
+          className="bg-white text-indigo-600 text-xs font-bold px-3 py-1 rounded-full"
+        >
+          立即下载
+        </button>
+        <button onClick={onDismiss} className="text-indigo-200 hover:text-white">
+          <X size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // ===================== Login View =====================
 
@@ -671,6 +695,33 @@ function ProfileTab({ user, onLogout, onRefresh }: {
   user: UserType; onLogout: () => void; onRefresh: () => void;
 }) {
   const [showConfirmSeed, setShowConfirmSeed] = useState(false);
+  const [excelMsg, setExcelMsg] = useState('');
+  const importRef = useRef<HTMLInputElement>(null);
+
+  const handleExportExcel = () => {
+    const blob = store.exportUserDataExcel(user.id);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `奖励存折-${user.displayName}-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setExcelMsg('导入中…');
+    const result = await store.importUserDataFromExcel(file, user.id);
+    if (result.error) {
+      setExcelMsg(`导入失败: ${result.error}`);
+    } else {
+      setExcelMsg(`✓ 已导入 ${result.imported} 条奖励到「${result.listName}」`);
+      onRefresh();
+    }
+    e.target.value = '';
+  };
+
   return (
     <div className="p-4 space-y-4">
       <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 text-center">
@@ -690,6 +741,27 @@ function ProfileTab({ user, onLogout, onRefresh }: {
             <div className="text-xs text-emerald-600 font-medium">参与的清单</div>
           </div>
         </div>
+      </div>
+
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+        <h3 className="font-bold text-gray-800 mb-3 text-sm flex items-center gap-1.5"><FileText size={15} className="text-indigo-500" />数据导出/导入</h3>
+        {excelMsg && (
+          <div className={`mb-3 p-2.5 rounded-lg text-sm ${excelMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+            {excelMsg}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <button onClick={handleExportExcel}
+            className="flex-1 bg-indigo-50 text-indigo-700 rounded-xl py-2.5 text-sm font-medium hover:bg-indigo-100 transition-colors flex items-center justify-center gap-1.5">
+            <Download size={15} /> 导出 Excel
+          </button>
+          <button onClick={() => importRef.current?.click()}
+            className="flex-1 bg-emerald-50 text-emerald-700 rounded-xl py-2.5 text-sm font-medium hover:bg-emerald-100 transition-colors flex items-center justify-center gap-1.5">
+            <Upload size={15} /> 导入 Excel
+          </button>
+          <input ref={importRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImportExcel} />
+        </div>
+        <p className="text-xs text-gray-400 mt-2">导出您创建的所有清单和奖励；导入将创建新清单</p>
       </div>
 
       <button onClick={onLogout}
@@ -949,6 +1021,15 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [adminError, setAdminError] = useState('');
 
+  // Backup/restore state
+  const [backupPassword, setBackupPassword] = useState('');
+  const [backupMsg, setBackupMsg] = useState('');
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [restorePassword, setRestorePassword] = useState('');
+  const [restoreMsg, setRestoreMsg] = useState('');
+  const [isRestoring, setIsRestoring] = useState(false);
+  const restoreFileRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     void refresh();
   }, []);
@@ -999,9 +1080,53 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
     await refresh();
   };
 
+  const handleBackup = async () => {
+    if (!backupPassword.trim()) { setBackupMsg('请输入备份密码'); return; }
+    setIsBackingUp(true);
+    setBackupMsg('');
+    try {
+      const data = await store.exportBackup(backupPassword.trim());
+      const blob = new Blob([data], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `奖励存折备份-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.rlbk`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupMsg('✓ 备份文件已下载');
+      setBackupPassword('');
+    } catch (err) {
+      setBackupMsg('备份失败: ' + (err instanceof Error ? err.message : String(err)));
+    }
+    setIsBackingUp(false);
+  };
+
+  const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!restorePassword.trim()) { setRestoreMsg('请先输入恢复密码'); e.target.value = ''; return; }
+    setIsRestoring(true);
+    setRestoreMsg('');
+    try {
+      const buf = await file.arrayBuffer();
+      const err = await store.importBackup(new Uint8Array(buf), restorePassword.trim());
+      if (err) {
+        setRestoreMsg(err);
+      } else {
+        setRestoreMsg('✓ 数据已恢复，即将重新加载…');
+        setRestorePassword('');
+        setTimeout(() => window.location.reload(), 1500);
+      }
+    } catch (err) {
+      setRestoreMsg('恢复失败: ' + (err instanceof Error ? err.message : String(err)));
+    }
+    setIsRestoring(false);
+    e.target.value = '';
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 max-w-md mx-auto p-4 flex flex-col">
-      <div className="flex items-center justify-between mb-6 bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
+    <div className="min-h-screen bg-gray-50 max-w-md mx-auto p-4 flex flex-col gap-4">
+      <div className="flex items-center justify-between bg-white p-4 rounded-2xl shadow-sm border border-gray-200">
         <h1 className="text-xl font-bold text-gray-800 flex items-center gap-2">
           <UserIcon className="text-indigo-600" /> 后台管理
         </h1>
@@ -1015,7 +1140,7 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-200 mb-4">
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-200">
         <h2 className="text-sm font-bold text-gray-700 mb-3">添加新用户</h2>
         {adminError && <div className="mb-3 bg-red-50 text-red-600 p-2.5 rounded-lg text-sm">{adminError}</div>}
         <form onSubmit={handleAdd} className="space-y-3">
@@ -1057,6 +1182,44 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
           ))}
         </div>
       </div>
+
+      {/* Backup & Restore Section */}
+      <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-200">
+        <h2 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-1.5"><Shield size={15} className="text-indigo-500" />备份与恢复</h2>
+
+        <div className="mb-4 pb-4 border-b border-gray-100">
+          <p className="text-xs text-gray-500 mb-2">将所有数据加密备份到文件（AES-256）</p>
+          {backupMsg && (
+            <div className={`mb-2 p-2 rounded-lg text-xs ${backupMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{backupMsg}</div>
+          )}
+          <div className="flex gap-2">
+            <input type="password" placeholder="备份密码" value={backupPassword}
+              onChange={e => setBackupPassword(e.target.value)}
+              className="flex-1 border border-gray-200 rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            <button onClick={() => void handleBackup()} disabled={isBackingUp}
+              className="bg-indigo-600 text-white rounded-xl px-4 py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-1.5">
+              <Download size={14} />{isBackingUp ? '加密中…' : '备份'}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <p className="text-xs text-gray-500 mb-2">从备份文件恢复（将覆盖当前所有数据）</p>
+          {restoreMsg && (
+            <div className={`mb-2 p-2 rounded-lg text-xs ${restoreMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{restoreMsg}</div>
+          )}
+          <div className="flex gap-2">
+            <input type="password" placeholder="备份密码" value={restorePassword}
+              onChange={e => setRestorePassword(e.target.value)}
+              className="flex-1 border border-gray-200 rounded-xl py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            <button onClick={() => restoreFileRef.current?.click()} disabled={isRestoring}
+              className="bg-amber-500 text-white rounded-xl px-4 py-2 text-sm font-medium hover:bg-amber-600 disabled:opacity-50 flex items-center gap-1.5">
+              <Upload size={14} />{isRestoring ? '恢复中…' : '恢复'}
+            </button>
+            <input ref={restoreFileRef} type="file" accept=".rlbk" className="hidden" onChange={handleRestoreFile} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1067,6 +1230,7 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
 export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [user, setUser] = useState<UserType | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<store.UpdateInfo | null>(null);
 
   useEffect(() => {
     store.initStore().then(() => {
@@ -1074,6 +1238,9 @@ export default function App() {
       if (stored) { setUser(stored); setView('main'); }
       setIsReady(true);
       setRefreshKey(k => k + 1);
+      store.checkForUpdate().then(info => {
+        if (info?.hasUpdate) setUpdateInfo(info);
+      });
     });
   }, []);
   const [view, setView] = useState<View>('auth');
@@ -1098,7 +1265,12 @@ export default function App() {
   }
 
   if (user.username === 'admin') {
-    return <AdminView onLogout={handleLogout} />;
+    return (
+      <>
+        {updateInfo && <UpdateBanner info={updateInfo} onDismiss={() => setUpdateInfo(null)} />}
+        <AdminView onLogout={handleLogout} />
+      </>
+    );
   }
 
   if (view === 'listDetail' && selectedListId) {
@@ -1116,6 +1288,7 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative">
+      {updateInfo && <UpdateBanner info={updateInfo} onDismiss={() => setUpdateInfo(null)} />}
       <div className="shrink-0 bg-white border-b border-gray-200 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">

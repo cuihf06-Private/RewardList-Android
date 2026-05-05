@@ -1,4 +1,7 @@
 import type { User, RewardList, Reward, Invitation, RewardCategory, RewardStatus } from './types';
+import * as XLSX from 'xlsx';
+
+export const APP_VERSION = '1.2.0';
 
 const KEYS = {
   users: 'reward_app_users',
@@ -303,4 +306,185 @@ export async function adminDeleteUser(id: string): Promise<string | null> {
   // Clean up invitations
   saveJson(KEYS.invitations, getInvitations().filter(i => i.fromUserId !== id && i.toUserId !== id && !ownedListIds.includes(i.listId)));
   return null;
+}
+
+// ===================== Backup & Restore =====================
+
+export async function exportBackup(password: string): Promise<Uint8Array> {
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Object.values(KEYS)) {
+    const val = localStorage.getItem(key);
+    if (val) snapshot[key] = JSON.parse(val);
+  }
+  const plaintext = new TextEncoder().encode(JSON.stringify(snapshot));
+
+  const passwordKey = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+  );
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const aesKey = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+    passwordKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, plaintext);
+
+  // Format: [magic 4 bytes][salt 16 bytes][iv 12 bytes][ciphertext]
+  const magic = new Uint8Array([0x52, 0x4C, 0x42, 0x4B]); // RLBK
+  const result = new Uint8Array(4 + 16 + 12 + ciphertext.byteLength);
+  result.set(magic, 0);
+  result.set(salt, 4);
+  result.set(iv, 20);
+  result.set(new Uint8Array(ciphertext), 32);
+  return result;
+}
+
+export async function importBackup(data: Uint8Array, password: string): Promise<string | null> {
+  try {
+    if (data[0] !== 0x52 || data[1] !== 0x4C || data[2] !== 0x42 || data[3] !== 0x4B) {
+      return '文件格式不正确，请选择有效的备份文件';
+    }
+    const salt = data.slice(4, 20);
+    const iv = data.slice(20, 32);
+    const ciphertext = data.slice(32);
+
+    const passwordKey = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+    );
+    const aesKey = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+      passwordKey, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+    );
+    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ciphertext);
+    const snapshot = JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
+
+    for (const [key, value] of Object.entries(snapshot)) {
+      localStorage.setItem(key, JSON.stringify(value));
+    }
+    return null;
+  } catch {
+    return '解密失败，密码可能不正确';
+  }
+}
+
+// ===================== Excel Export/Import =====================
+
+export function exportUserDataExcel(userId: string): Blob {
+  const lists = getListsByOwner(userId);
+  const allRewards = getRewards();
+  const users = getUsers();
+
+  const rows: Record<string, string>[] = [];
+
+  for (const list of lists) {
+    const rewards = allRewards.filter(r => r.listId === list.id);
+    for (const reward of rewards) {
+      const rewarder = users.find(u => u.id === reward.rewarderId);
+      const categoryMap: Record<string, string> = { money: '金钱', gift: '礼物', emotional: '情绪价值' };
+      const statusMap: Record<string, string> = { pending: '待兑现', claimed: '已申请', fulfilled: '已兑现' };
+      rows.push({
+        '清单名称': list.name,
+        '奖励标题': reward.title,
+        '类型': categoryMap[reward.category] || reward.category,
+        '金额': reward.category === 'money' && reward.amount ? String(reward.amount) : '',
+        '描述': reward.description || '',
+        '状态': statusMap[reward.status] || reward.status,
+        '奖励人': rewarder?.displayName || '未知',
+        '创建时间': new Date(reward.createdAt).toLocaleString('zh-CN'),
+      });
+    }
+  }
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '我的奖励');
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+export async function importUserDataFromExcel(
+  file: File,
+  userId: string,
+): Promise<{ imported: number; listName: string; error: string | null }> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target!.result as ArrayBuffer);
+        const wb = XLSX.read(data, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
+
+        const categoryReverseMap: Record<string, RewardCategory> = {
+          '金钱': 'money', '礼物': 'gift', '情绪价值': 'emotional',
+        };
+        const statusReverseMap: Record<string, RewardStatus> = {
+          '待兑现': 'pending', '已申请': 'claimed', '已兑现': 'fulfilled',
+        };
+
+        const dateStr = new Date().toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+        const importListName = `导入-${dateStr}`;
+        const newList = createList(importListName, '从Excel导入的奖励数据', userId);
+
+        const rewards = getRewards();
+        let imported = 0;
+        for (const row of rows) {
+          const title = row['奖励标题'] || row['title'] || '';
+          if (!title) continue;
+          const category = categoryReverseMap[row['类型']] || 'gift';
+          const status = statusReverseMap[row['状态']] || 'pending';
+          const amount = category === 'money' && row['金额'] ? parseFloat(row['金额']) : undefined;
+          const reward: Reward = {
+            id: genId(),
+            listId: newList.id,
+            rewarderId: userId,
+            category,
+            title,
+            description: row['描述'] || '',
+            amount,
+            status,
+            createdAt: Date.now(),
+          };
+          rewards.push(reward);
+          imported++;
+        }
+        saveJson(KEYS.rewards, rewards);
+        resolve({ imported, listName: importListName, error: null });
+      } catch (err) {
+        resolve({ imported: 0, listName: '', error: '解析Excel文件失败: ' + (err instanceof Error ? err.message : String(err)) });
+      }
+    };
+    reader.onerror = () => resolve({ imported: 0, listName: '', error: '读取文件失败' });
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// ===================== Version Check =====================
+
+export const GITCODE_RELEASE_URL = 'https://gitcode.com/yudixianzong/RewardList-Android/releases';
+
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  latestVersion: string;
+  releasePageUrl: string;
+}
+
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(
+      'https://gitcode.com/api/v5/repos/yudixianzong/RewardList-Android/releases?per_page=1',
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const releases = await res.json() as Array<{ tag_name: string }>;
+    if (!releases.length) return null;
+    const latestVersion = releases[0].tag_name.replace(/^v/, '');
+    const hasUpdate = latestVersion !== APP_VERSION;
+    return { hasUpdate, latestVersion, releasePageUrl: GITCODE_RELEASE_URL };
+  } catch {
+    return null;
+  }
 }
