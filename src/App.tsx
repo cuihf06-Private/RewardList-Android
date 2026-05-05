@@ -2,10 +2,57 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ListOrdered, Gift, BarChart3, User as UserIcon, Plus, ArrowLeft, Trophy, ClipboardList, FileText, Activity, Banknote, RefreshCw,
   Send, X, Trash2, Bell, LogOut, Sparkles, ChevronRight, Users, Info,
-  ChevronDown, ChevronUp, Download, Upload, Shield
+  ChevronDown, ChevronUp, Download, Upload, Shield, Share2
 } from 'lucide-react';
 import type { User as UserType, Reward, RewardCategory, RewardStatus } from './types';
 import * as store from './store';
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+
+// ---- File save + share helper ----
+// Saves a Blob/Uint8Array to Downloads, shows its path, then shares via native share sheet
+async function saveAndShare(
+  data: Blob | Uint8Array,
+  fileName: string,
+  mimeType: string,
+): Promise<{ path: string; error?: string }> {
+  // Convert to base64
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(await data.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+
+  try {
+    const result = await Filesystem.writeFile({
+      path: fileName,
+      data: base64,
+      directory: Directory.External, // Maps to primary external storage (Downloads visible)
+      recursive: true,
+    });
+    return { path: result.uri };
+  } catch {
+    // Fallback: write to app Documents directory
+    try {
+      const result = await Filesystem.writeFile({
+        path: fileName,
+        data: base64,
+        directory: Directory.Documents,
+        recursive: true,
+      });
+      return { path: result.uri };
+    } catch (err2) {
+      return { path: '', error: String(err2) };
+    }
+  }
+}
+
+async function shareFile(uri: string, title: string): Promise<void> {
+  try {
+    await Share.share({ title, url: uri, dialogTitle: '分享文件' });
+  } catch {
+    // User cancelled or share not available — ignore
+  }
+}
 
 // ===================== Constants =====================
 
@@ -696,16 +743,28 @@ function ProfileTab({ user, onLogout, onRefresh }: {
 }) {
   const [showConfirmSeed, setShowConfirmSeed] = useState(false);
   const [excelMsg, setExcelMsg] = useState('');
+  const [excelUri, setExcelUri] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
   const importRef = useRef<HTMLInputElement>(null);
 
-  const handleExportExcel = () => {
-    const blob = store.exportUserDataExcel(user.id);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `奖励存折-${user.displayName}-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleExportExcel = async () => {
+    setIsExporting(true);
+    setExcelMsg('导出中…');
+    setExcelUri('');
+    try {
+      const blob = store.exportUserDataExcel(user.id);
+      const fileName = `奖励存折-${user.displayName}-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.xlsx`;
+      const { path, error } = await saveAndShare(blob, fileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      if (error) {
+        setExcelMsg(`保存失败: ${error}`);
+      } else {
+        setExcelUri(path);
+        setExcelMsg(`✓ 已保存到手机下载目录\n${fileName}`);
+      }
+    } catch (err) {
+      setExcelMsg('导出失败: ' + (err instanceof Error ? err.message : String(err)));
+    }
+    setIsExporting(false);
   };
 
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -746,14 +805,22 @@ function ProfileTab({ user, onLogout, onRefresh }: {
       <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-bold text-gray-800 mb-3 text-sm flex items-center gap-1.5"><FileText size={15} className="text-indigo-500" />数据导出/导入</h3>
         {excelMsg && (
-          <div className={`mb-3 p-2.5 rounded-lg text-sm ${excelMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+          <div className={`mb-3 p-2.5 rounded-lg text-sm whitespace-pre-line ${excelMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
             {excelMsg}
+            {excelUri && (
+              <button
+                onClick={() => void shareFile(excelUri, '奖励存折数据')}
+                className="mt-2 flex items-center gap-1.5 bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg w-full justify-center"
+              >
+                <Share2 size={13} /> 分享文件（微信等）
+              </button>
+            )}
           </div>
         )}
         <div className="flex gap-2">
-          <button onClick={handleExportExcel}
-            className="flex-1 bg-indigo-50 text-indigo-700 rounded-xl py-2.5 text-sm font-medium hover:bg-indigo-100 transition-colors flex items-center justify-center gap-1.5">
-            <Download size={15} /> 导出 Excel
+          <button onClick={() => void handleExportExcel()} disabled={isExporting}
+            className="flex-1 bg-indigo-50 text-indigo-700 rounded-xl py-2.5 text-sm font-medium hover:bg-indigo-100 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50">
+            <Download size={15} /> {isExporting ? '导出中…' : '导出 Excel'}
           </button>
           <button onClick={() => importRef.current?.click()}
             className="flex-1 bg-emerald-50 text-emerald-700 rounded-xl py-2.5 text-sm font-medium hover:bg-emerald-100 transition-colors flex items-center justify-center gap-1.5">
@@ -761,7 +828,7 @@ function ProfileTab({ user, onLogout, onRefresh }: {
           </button>
           <input ref={importRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImportExcel} />
         </div>
-        <p className="text-xs text-gray-400 mt-2">导出您创建的所有清单和奖励；导入将创建新清单</p>
+        <p className="text-xs text-gray-400 mt-2">文件保存至手机「下载」文件夹，可分享到微信等应用</p>
       </div>
 
       <button onClick={onLogout}
@@ -1024,6 +1091,7 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
   // Backup/restore state
   const [backupPassword, setBackupPassword] = useState('');
   const [backupMsg, setBackupMsg] = useState('');
+  const [backupUri, setBackupUri] = useState('');
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [restorePassword, setRestorePassword] = useState('');
   const [restoreMsg, setRestoreMsg] = useState('');
@@ -1084,17 +1152,18 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
     if (!backupPassword.trim()) { setBackupMsg('请输入备份密码'); return; }
     setIsBackingUp(true);
     setBackupMsg('');
+    setBackupUri('');
     try {
       const data = await store.exportBackup(backupPassword.trim());
-      const blob = new Blob([data], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `奖励存折备份-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.rlbk`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setBackupMsg('✓ 备份文件已下载');
-      setBackupPassword('');
+      const fileName = `奖励存折备份-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.rlbk`;
+      const { path, error } = await saveAndShare(data, fileName, 'application/octet-stream');
+      if (error) {
+        setBackupMsg(`备份失败: ${error}`);
+      } else {
+        setBackupUri(path);
+        setBackupMsg(`✓ 已保存到手机下载目录\n${fileName}`);
+        setBackupPassword('');
+      }
     } catch (err) {
       setBackupMsg('备份失败: ' + (err instanceof Error ? err.message : String(err)));
     }
@@ -1188,9 +1257,19 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
         <h2 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-1.5"><Shield size={15} className="text-indigo-500" />备份与恢复</h2>
 
         <div className="mb-4 pb-4 border-b border-gray-100">
-          <p className="text-xs text-gray-500 mb-2">将所有数据加密备份到文件（AES-256）</p>
+          <p className="text-xs text-gray-500 mb-2">将所有数据加密备份到文件（AES-256），保存至手机下载目录</p>
           {backupMsg && (
-            <div className={`mb-2 p-2 rounded-lg text-xs ${backupMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{backupMsg}</div>
+            <div className={`mb-2 p-2.5 rounded-lg text-xs whitespace-pre-line ${backupMsg.startsWith('✓') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+              {backupMsg}
+              {backupUri && (
+                <button
+                  onClick={() => void shareFile(backupUri, '奖励存折备份')}
+                  className="mt-2 flex items-center gap-1.5 bg-emerald-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg w-full justify-center"
+                >
+                  <Share2 size={13} /> 分享文件（微信等）
+                </button>
+              )}
+            </div>
           )}
           <div className="flex gap-2">
             <input type="password" placeholder="备份密码" value={backupPassword}
