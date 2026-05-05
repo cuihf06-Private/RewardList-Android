@@ -23,20 +23,22 @@ async function saveAndShare(
   const base64 = btoa(binary);
 
   try {
+    // Directory.ExternalStorage = /storage/emulated/0/ (公共外部存储根目录)
+    // path 加 Download/ 前缀即存入公共 Downloads 文件夹
     const result = await Filesystem.writeFile({
-      path: fileName,
+      path: `Download/${fileName}`,
       data: base64,
-      directory: Directory.External, // Maps to primary external storage (Downloads visible)
+      directory: Directory.ExternalStorage,
       recursive: true,
     });
     return { path: result.uri };
   } catch {
-    // Fallback: write to app Documents directory
+    // Fallback: app 私有外部目录
     try {
       const result = await Filesystem.writeFile({
         path: fileName,
         data: base64,
-        directory: Directory.Documents,
+        directory: Directory.External,
         recursive: true,
       });
       return { path: result.uri };
