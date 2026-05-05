@@ -71,7 +71,21 @@ export function setCurrentUser(user: User | null): void {
   }
 }
 
-export async function initStore(): Promise<void> {}
+const ADMIN_USERNAME = 'admin';
+const ADMIN_DEFAULT_PASSWORD = 'admin';
+
+export async function initStore(): Promise<void> {
+  // Auto-create the admin account on first run if it doesn't exist
+  const creds = getCredentials();
+  if (!creds[ADMIN_USERNAME]) {
+    const salt = genId() + genId();
+    const hash = await hashPassword(ADMIN_DEFAULT_PASSWORD, salt);
+    const userId = 'admin-' + genId();
+    // Admin user is NOT stored in the regular users list (they don't appear in user search)
+    creds[ADMIN_USERNAME] = { salt, hash, userId };
+    saveJson(KEYS.credentials, creds);
+  }
+}
 
 export async function registerUser(username: string, password: string, displayName: string, avatarColor: string): Promise<User | string> {
   const existing = getUserByUsername(username);
@@ -95,6 +109,10 @@ export async function loginUser(username: string, password: string): Promise<Use
   if (!entry) return '用户名或密码错误';
   const hash = await hashPassword(password, entry.salt);
   if (hash !== entry.hash) return '用户名或密码错误';
+  // Admin login: return a synthetic user object
+  if (username === ADMIN_USERNAME) {
+    return { id: entry.userId, username: ADMIN_USERNAME, displayName: '管理员', avatarColor: 'bg-slate-700' };
+  }
   const user = getUserById(entry.userId);
   if (!user) return '用户数据错误';
   return user;
@@ -220,7 +238,69 @@ export function getPendingInvitations(userId: string): Invitation[] {
 }
 
 export async function seedDemoData(_currentUserId: string): Promise<void> {}
-export async function loadAdminUsers(): Promise<User[]> { return []; }
-export async function adminCreateUser(_username: string, _password: string, _displayName: string): Promise<string | null> { return '单机版不支持管理员功能'; }
-export async function adminUpdateUser(_id: string, _patch: { password?: string; displayName?: string }): Promise<string | null> { return null; }
-export async function adminDeleteUser(_id: string): Promise<string | null> { return null; }
+
+export async function loadAdminUsers(): Promise<User[]> {
+  return getUsers();
+}
+
+export async function adminCreateUser(username: string, password: string, displayName: string): Promise<string | null> {
+  if (username === ADMIN_USERNAME) return '不能使用保留用户名';
+  const existing = getUserByUsername(username);
+  if (existing) return '用户名已存在';
+  const salt = genId() + genId();
+  const hash = await hashPassword(password, salt);
+  const userId = genId();
+  const user: User = { id: userId, username, displayName, avatarColor: 'bg-blue-500' };
+  const users = getUsers();
+  users.push(user);
+  saveUsers(users);
+  const creds = getCredentials();
+  creds[username] = { salt, hash, userId };
+  saveJson(KEYS.credentials, creds);
+  return null;
+}
+
+export async function adminUpdateUser(id: string, patch: { password?: string; displayName?: string }): Promise<string | null> {
+  const users = getUsers();
+  const user = users.find(u => u.id === id);
+  if (!user) return '用户不存在';
+  if (patch.displayName !== undefined) {
+    user.displayName = patch.displayName;
+    saveUsers(users);
+  }
+  if (patch.password && patch.password.trim()) {
+    const creds = getCredentials();
+    const entry = creds[user.username];
+    if (entry) {
+      const salt = genId() + genId();
+      const hash = await hashPassword(patch.password.trim(), salt);
+      creds[user.username] = { salt, hash, userId: id };
+      saveJson(KEYS.credentials, creds);
+    }
+  }
+  return null;
+}
+
+export async function adminDeleteUser(id: string): Promise<string | null> {
+  const users = getUsers();
+  const user = users.find(u => u.id === id);
+  if (!user) return '用户不存在';
+  // Remove credentials
+  const creds = getCredentials();
+  delete creds[user.username];
+  saveJson(KEYS.credentials, creds);
+  // Remove user
+  saveUsers(users.filter(u => u.id !== id));
+  // Clean up lists owned by this user
+  const lists = getLists();
+  const ownedListIds = lists.filter(l => l.ownerId === id).map(l => l.id);
+  saveLists(lists.filter(l => l.ownerId !== id).map(l => ({
+    ...l,
+    rewarderIds: l.rewarderIds.filter(rid => rid !== id),
+  })));
+  // Clean up rewards in owned lists, and rewards added by this user
+  saveJson(KEYS.rewards, getRewards().filter(r => !ownedListIds.includes(r.listId) && r.rewarderId !== id));
+  // Clean up invitations
+  saveJson(KEYS.invitations, getInvitations().filter(i => i.fromUserId !== id && i.toUserId !== id && !ownedListIds.includes(i.listId)));
+  return null;
+}

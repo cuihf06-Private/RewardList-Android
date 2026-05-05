@@ -1097,7 +1097,7 @@ export default function App() {
     return <LoginView onLogin={handleLogin} onGoRegister={() => setAuthMode('register')} />;
   }
 
-  if (user.username === 'admin***') {
+  if (user.username === 'admin') {
     return <AdminView onLogout={handleLogout} />;
   }
 
