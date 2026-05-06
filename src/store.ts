@@ -1,7 +1,7 @@
 import type { User, RewardList, Reward, Invitation, RewardCategory, RewardStatus } from './types';
 import * as XLSX from 'xlsx';
 
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.0';
 
 const KEYS = {
   users: 'reward_app_users',
