@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ListOrdered, Gift, BarChart3, User as UserIcon, Plus, ArrowLeft, Trophy, ClipboardList, FileText, Activity, Banknote, RefreshCw,
   Send, X, Trash2, Bell, LogOut, Sparkles, ChevronRight, Users, Info,
-  ChevronDown, ChevronUp, Download, Upload, Shield, Share2
+  ChevronDown, ChevronUp, Download, Upload, Shield, Share2, RefreshCcw
 } from 'lucide-react';
 import type { User as UserType, Reward, RewardCategory, RewardStatus } from './types';
 import * as store from './store';
@@ -99,24 +99,105 @@ type ModalType = 'createList' | 'addReward' | 'invite' | null;
 
 // ===================== Update Banner =====================
 
-function UpdateBanner({ info, onDismiss }: { info: store.UpdateInfo; onDismiss: () => void }) {
+// ===================== Update Check Section =====================
+
+async function downloadApk(info: store.UpdateInfo, setStatus: (s: string) => void): Promise<void> {
+  setStatus('正在连接 GitCode…');
+  // Try GitCode first
+  if (info.gitcodeApkUrl) {
+    try {
+      const res = await fetch(info.gitcodeApkUrl, { method: 'HEAD', signal: AbortSignal.timeout(6000) });
+      if (res.ok) {
+        setStatus('正在从 GitCode 下载，请稍候…');
+        window.open(info.gitcodeApkUrl, '_system');
+        return;
+      }
+    } catch { /* fallthrough */ }
+  }
+  // Fallback to GitHub
+  if (info.githubApkUrl) {
+    setStatus('GitCode 不可用，正在从 GitHub 下载…');
+    window.open(info.githubApkUrl, '_system');
+    return;
+  }
+  setStatus('无法获取下载链接，请稍后重试。');
+}
+
+function UpdateCheckSection() {
+  const [checking, setChecking] = useState(false);
+  const [info, setInfo] = useState<store.UpdateInfo | null>(null);
+  const [checkMsg, setCheckMsg] = useState('');
+  const [downloading, setDownloading] = useState(false);
+  const [dlStatus, setDlStatus] = useState('');
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  const handleCheck = async () => {
+    setChecking(true);
+    setCheckMsg('');
+    setInfo(null);
+    setDlStatus('');
+    const result = await store.checkForUpdate();
+    setChecking(false);
+    if (!result) {
+      setCheckMsg('检测失败，请检查网络连接后重试。');
+      return;
+    }
+    setInfo(result);
+    if (result.hasUpdate) {
+      setShowConfirm(true);
+    } else {
+      setCheckMsg(`当前已是最新版本 v${result.currentVersion}`);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!info) return;
+    setShowConfirm(false);
+    setDownloading(true);
+    await downloadApk(info, setDlStatus);
+    setDownloading(false);
+  };
+
   return (
-    <div className="bg-indigo-600 text-white px-4 py-2.5 flex items-center justify-between gap-2">
-      <div className="flex items-center gap-2 text-sm">
-        <Sparkles size={16} />
-        <span>发现新版本 v{info.latestVersion}</span>
-      </div>
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => window.open(info.releasePageUrl, '_blank')}
-          className="bg-white text-indigo-600 text-xs font-bold px-3 py-1 rounded-full"
-        >
-          立即下载
-        </button>
-        <button onClick={onDismiss} className="text-indigo-200 hover:text-white">
-          <X size={16} />
-        </button>
-      </div>
+    <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
+      <h3 className="font-bold text-gray-800 mb-3 text-sm flex items-center gap-1.5">
+        <Sparkles size={15} className="text-indigo-500" />关于与更新
+      </h3>
+      <p className="text-xs text-gray-500 mb-3">当前版本：v{store.APP_VERSION}</p>
+
+      {checkMsg && (
+        <div className={`mb-3 p-2.5 rounded-lg text-sm ${checkMsg.includes('失败') ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-700'}`}>
+          {checkMsg}
+        </div>
+      )}
+
+      {dlStatus && (
+        <div className="mb-3 p-2.5 rounded-lg text-sm bg-indigo-50 text-indigo-700">{dlStatus}</div>
+      )}
+
+      {/* Confirm download dialog */}
+      {showConfirm && info && (
+        <div className="mb-3 p-3 rounded-xl bg-indigo-50 border border-indigo-200">
+          <p className="text-sm font-bold text-indigo-800 mb-1">🎉 发现新版本 v{info.latestVersion}</p>
+          <p className="text-xs text-indigo-600 mb-3">当前版本 v{info.currentVersion}，是否立即下载安装？</p>
+          <div className="flex gap-2">
+            <button onClick={() => void handleDownload()}
+              className="flex-1 bg-indigo-600 text-white text-sm font-bold py-2 rounded-lg flex items-center justify-center gap-1.5">
+              <Download size={14} /> 立即下载
+            </button>
+            <button onClick={() => setShowConfirm(false)}
+              className="flex-1 bg-white text-indigo-600 text-sm font-medium py-2 rounded-lg border border-indigo-200">
+              稍后再说
+            </button>
+          </div>
+        </div>
+      )}
+
+      <button onClick={() => void handleCheck()} disabled={checking || downloading}
+        className="w-full bg-indigo-50 text-indigo-700 rounded-xl py-2.5 text-sm font-medium hover:bg-indigo-100 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50">
+        <RefreshCcw size={14} className={checking ? 'animate-spin' : ''} />
+        {checking ? '检测中…' : '检测新版本'}
+      </button>
     </div>
   );
 }
@@ -833,6 +914,8 @@ function ProfileTab({ user, onLogout, onRefresh }: {
         <p className="text-xs text-gray-400 mt-2">文件保存至手机「下载」文件夹，可分享到微信等应用</p>
       </div>
 
+      <UpdateCheckSection />
+
       <button onClick={onLogout}
         className="w-full bg-red-50 text-red-600 rounded-2xl py-3 font-medium hover:bg-red-100 transition-colors flex items-center justify-center gap-2">
         <LogOut size={18} /> 退出登录
@@ -1301,6 +1384,8 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
           </div>
         </div>
       </div>
+
+      <UpdateCheckSection />
     </div>
   );
 }
@@ -1311,7 +1396,6 @@ function AdminView({ onLogout }: { onLogout: () => void }) {
 export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [user, setUser] = useState<UserType | null>(null);
-  const [updateInfo, setUpdateInfo] = useState<store.UpdateInfo | null>(null);
 
   useEffect(() => {
     store.initStore().then(() => {
@@ -1319,9 +1403,6 @@ export default function App() {
       if (stored) { setUser(stored); setView('main'); }
       setIsReady(true);
       setRefreshKey(k => k + 1);
-      store.checkForUpdate().then(info => {
-        if (info?.hasUpdate) setUpdateInfo(info);
-      });
     });
   }, []);
   const [view, setView] = useState<View>('auth');
@@ -1346,12 +1427,7 @@ export default function App() {
   }
 
   if (user.username === 'admin') {
-    return (
-      <>
-        {updateInfo && <UpdateBanner info={updateInfo} onDismiss={() => setUpdateInfo(null)} />}
-        <AdminView onLogout={handleLogout} />
-      </>
-    );
+    return <AdminView onLogout={handleLogout} />;
   }
 
   if (view === 'listDetail' && selectedListId) {
@@ -1369,7 +1445,6 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-50 max-w-md mx-auto relative">
-      {updateInfo && <UpdateBanner info={updateInfo} onDismiss={() => setUpdateInfo(null)} />}
       <div className="shrink-0 bg-white border-b border-gray-200 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">

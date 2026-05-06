@@ -1,7 +1,7 @@
 import type { User, RewardList, Reward, Invitation, RewardCategory, RewardStatus } from './types';
 import * as XLSX from 'xlsx';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 const KEYS = {
   users: 'reward_app_users',
@@ -461,30 +461,100 @@ export async function importUserDataFromExcel(
 
 // ===================== Version Check =====================
 
-export const GITCODE_RELEASE_URL = 'https://gitcode.com/yudixianzong/RewardList-Android/releases';
-
 export interface UpdateInfo {
   hasUpdate: boolean;
+  currentVersion: string;
   latestVersion: string;
-  releasePageUrl: string;
+  latestTag: string;
+  gitcodeApkUrl: string;
+  githubApkUrl: string;
 }
 
-export async function checkForUpdate(): Promise<UpdateInfo | null> {
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 6000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(
-      'https://gitcode.com/api/v5/repos/yudixianzong/RewardList-Android/releases?per_page=1',
-      { signal: controller.signal }
-    );
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
     clearTimeout(timer);
+  }
+}
+
+async function getGitcodeInfo(): Promise<{ tag: string; apkUrl: string } | null> {
+  try {
+    const res = await fetchWithTimeout(
+      'https://gitcode.com/api/v5/repos/yudixianzong/RewardList-Android/releases?per_page=1'
+    );
     if (!res.ok) return null;
     const releases = await res.json() as Array<{ tag_name: string }>;
     if (!releases.length) return null;
-    const latestVersion = releases[0].tag_name.replace(/^v/, '');
-    const hasUpdate = latestVersion !== APP_VERSION;
-    return { hasUpdate, latestVersion, releasePageUrl: GITCODE_RELEASE_URL };
+    const tag = releases[0].tag_name;
+    // Get git tree to find APK blob SHA (needed for raw.atomgit.com URL)
+    const treeRes = await fetchWithTimeout(
+      `https://gitcode.com/api/v5/repos/yudixianzong/RewardList-Android/git/trees/${tag}?recursive=1`
+    );
+    if (!treeRes.ok) return { tag, apkUrl: '' };
+    const tree = await treeRes.json() as { tree: Array<{ path: string; sha: string }> };
+    const apkEntry = tree.tree?.find(f => f.path === 'reward-list.apk');
+    const apkUrl = apkEntry
+      ? `https://raw.atomgit.com/yudixianzong/RewardList-Android/blobs/${apkEntry.sha}/reward-list.apk`
+      : '';
+    return { tag, apkUrl };
   } catch {
     return null;
   }
+}
+
+async function getGithubInfo(): Promise<{ tag: string; apkUrl: string } | null> {
+  try {
+    const res = await fetchWithTimeout(
+      'https://api.github.com/repos/cuihf06-Private/RewardList-Android/releases/latest'
+    );
+    if (!res.ok) return null;
+    const release = await res.json() as { tag_name: string };
+    const tag = release.tag_name;
+    const apkUrl = `https://github.com/cuihf06-Private/RewardList-Android/releases/download/${tag}/reward-list.apk`;
+    return { tag, apkUrl };
+  } catch {
+    return null;
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+export async function checkForUpdate(): Promise<UpdateInfo | null> {
+  const [gitcode, github] = await Promise.allSettled([getGitcodeInfo(), getGithubInfo()]);
+  const gc = gitcode.status === 'fulfilled' ? gitcode.value : null;
+  const gh = github.status === 'fulfilled' ? github.value : null;
+
+  if (!gc && !gh) return null;
+
+  // Use whichever has the higher version; prefer gitcode on tie
+  let best = gc || gh!;
+  if (gc && gh) {
+    const gcVer = gc.tag.replace(/^v/, '');
+    const ghVer = gh.tag.replace(/^v/, '');
+    best = compareVersions(ghVer, gcVer) > 0 ? gh! : gc;
+  }
+
+  const latestTag = best.tag;
+  const latestVersion = latestTag.replace(/^v/, '');
+  const hasUpdate = compareVersions(latestVersion, APP_VERSION) > 0;
+
+  return {
+    hasUpdate,
+    currentVersion: APP_VERSION,
+    latestVersion,
+    latestTag,
+    gitcodeApkUrl: gc?.apkUrl || '',
+    githubApkUrl: gh?.apkUrl || '',
+  };
 }
